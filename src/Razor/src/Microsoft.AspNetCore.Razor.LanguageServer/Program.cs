@@ -4,7 +4,6 @@
 using System;
 using System.Diagnostics;
 using System.Linq;
-using System.IO;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -101,7 +100,7 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
                         services.AddSingleton<IOptionsMonitor<RazorLSPOptions>, RazorLSPOptionsMonitor>();
 
                         // File change listeners
-                      services.AddSingleton<IProjectConfigurationFileChangeListener, ProjectConfigurationStateSynchronizer>();
+                        services.AddSingleton<IProjectConfigurationFileChangeListener, ProjectConfigurationStateSynchronizer>();
                         services.AddSingleton<IProjectFileChangeListener, ProjectFileSynchronizer>();
                         services.AddSingleton<IRazorFileChangeListener, RazorFileSynchronizer>();
 
