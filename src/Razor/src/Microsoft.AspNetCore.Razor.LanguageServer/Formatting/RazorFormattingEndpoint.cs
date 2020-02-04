@@ -73,6 +73,11 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
 
         public async Task<TextEditContainer> Handle(DocumentRangeFormattingParams request, CancellationToken cancellationToken)
         {
+            if (!_optionsMonitor.CurrentValue.EnableFormatting)
+            {
+                return null;
+            }
+
             var document = await Task.Factory.StartNew(() =>
             {
                 _documentResolver.TryResolveDocument(request.TextDocument.Uri.AbsolutePath, out var documentSnapshot);
@@ -86,7 +91,7 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
             }
 
             var codeDocument = await document.GetGeneratedOutputAsync();
-            if (codeDocument.IsUnsupported() || !_optionsMonitor.CurrentValue.EnableFormatting)
+            if (codeDocument.IsUnsupported())
             {
                 return null;
             }

@@ -3,29 +3,43 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Razor.Language;
 using Microsoft.AspNetCore.Razor.Language.Legacy;
-using Microsoft.AspNetCore.Razor.Language.Syntax;
 using Microsoft.AspNetCore.Razor.LanguageServer.Common;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.Formatting;
+using Microsoft.CodeAnalysis.Razor;
+using Microsoft.CodeAnalysis.Text;
 using OmniSharp.Extensions.LanguageServer.Protocol.Models;
 using OmniSharp.Extensions.LanguageServer.Protocol.Server;
+using LSPFormattingOptions = OmniSharp.Extensions.LanguageServer.Protocol.Models.FormattingOptions;
 using Range = OmniSharp.Extensions.LanguageServer.Protocol.Models.Range;
+using RoslynFormattingOptions = Microsoft.CodeAnalysis.Formatting.FormattingOptions;
 
 namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
 {
-    internal class DefaultRazorFormattingService : RazorFormattingService
+    internal class BackupRazorFormattingService : RazorFormattingService
     {
+        private readonly ForegroundDispatcher _foregroundDispatcher;
+        private readonly RazorDocumentMappingService _documentMappingService;
+        private readonly FilePathNormalizer _filePathNormalizer;
+        private readonly ProjectSnapshotManagerAccessor _projectSnapshotManagerAccessor;
         private readonly ILanguageServer _server;
-        private readonly CSharpFormatter _cSharpFormatter;
-        private readonly HtmlFormatter _htmlFormatter;
 
-        public DefaultRazorFormattingService(
+        public BackupRazorFormattingService(
+            ForegroundDispatcher foregroundDispatcher,
             RazorDocumentMappingService documentMappingService,
             FilePathNormalizer filePathNormalizer,
+            ProjectSnapshotManagerAccessor projectSnapshotManagerAccessor,
             ILanguageServer server)
         {
+            if (foregroundDispatcher is null)
+            {
+                throw new ArgumentNullException(nameof(foregroundDispatcher));
+            }
+
             if (documentMappingService is null)
             {
                 throw new ArgumentNullException(nameof(documentMappingService));
@@ -36,17 +50,24 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
                 throw new ArgumentNullException(nameof(filePathNormalizer));
             }
 
+            if (projectSnapshotManagerAccessor is null)
+            {
+                throw new ArgumentNullException(nameof(projectSnapshotManagerAccessor));
+            }
+
             if (server is null)
             {
                 throw new ArgumentNullException(nameof(server));
             }
 
+            _foregroundDispatcher = foregroundDispatcher;
+            _documentMappingService = documentMappingService;
+            _filePathNormalizer = filePathNormalizer;
+            _projectSnapshotManagerAccessor = projectSnapshotManagerAccessor;
             _server = server;
-            _cSharpFormatter = new CSharpFormatter(documentMappingService, server, filePathNormalizer);
-            _htmlFormatter = new HtmlFormatter(server, filePathNormalizer);
         }
 
-        public override async Task<TextEdit[]> FormatAsync(Uri uri, RazorCodeDocument codeDocument, Range range, FormattingOptions options)
+        public override Task<TextEdit[]> FormatAsync(Uri uri, RazorCodeDocument codeDocument, Range range, LSPFormattingOptions options)
         {
             if (uri is null)
             {
@@ -68,14 +89,14 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
                 throw new ArgumentNullException(nameof(options));
             }
 
-            var formattingContext = CreateFormattingContext(uri, codeDocument, range, options);
-
-            var edits2 = await FormatCodeBlockDirectivesAsync(formattingContext);
+            var syntaxTree = codeDocument.GetSyntaxTree();
+            var formattingSpans = syntaxTree.GetFormattingSpans();
+            var indentations = GetLineIndentationMap(codeDocument.Source, formattingSpans);
 
             var edits = new List<TextEdit>();
             for (var i = (int)range.Start.Line; i <= (int)range.End.Line; i++)
             {
-                var context = formattingContext.Indentations[i];
+                var context = indentations[i];
                 if (context.IndentationLevel == -1)
                 {
                     // Couldn't determine the desired indentation. Leave this line alone.
@@ -117,26 +138,13 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
                 }
             }
 
-            // return edits.ToArray();
-            return edits2;
+            return Task.FromResult(edits.ToArray());
         }
 
-        internal static FormattingContext CreateFormattingContext(Uri uri, RazorCodeDocument codedocument, Range range, FormattingOptions options)
+        internal static Dictionary<int, IndentationContext> GetLineIndentationMap(RazorSourceDocument source, IReadOnlyList<FormattingSpan> formattingSpans)
         {
-            var result = new FormattingContext()
-            {
-                Uri = uri,
-                CodeDocument = codedocument,
-                Range = range,
-                Options = options
-            };
-
-            var source = codedocument.Source;
-            var syntaxTree = codedocument.GetSyntaxTree();
-            var formattingSpans = syntaxTree.GetFormattingSpans();
-
+            var result = new Dictionary<int, IndentationContext>();
             var total = 0;
-            var previousIndentationLevel = 0;
             for (var i = 0; i < source.Lines.Count; i++)
             {
                 // Get first non-whitespace character position
@@ -155,24 +163,21 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
                 // position now contains the first non-whitespace character or 0. Get the corresponding FormattingSpan.
                 if (TryGetFormattingSpan(total + nonWsChar, formattingSpans, out var span))
                 {
-                    result.Indentations[i] = new IndentationContext
+                    result[i] = new IndentationContext
                     {
                         Line = i,
                         IndentationLevel = span.IndentationLevel,
-                        RelativeIndentationLevel = span.IndentationLevel - previousIndentationLevel,
                         ExistingIndentation = nonWsChar,
                         FirstSpan = span,
                     };
-                    previousIndentationLevel = span.IndentationLevel;
                 }
                 else
                 {
                     // Couldn't find a corresponding FormattingSpan.
-                    result.Indentations[i] = new IndentationContext
+                    result[i] = new IndentationContext
                     {
                         Line = i,
                         IndentationLevel = -1,
-                        RelativeIndentationLevel = previousIndentationLevel,
                         ExistingIndentation = nonWsChar,
                     };
                 }
@@ -211,91 +216,91 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
             return false;
         }
 
-        private async Task<TextEdit[]> FormatCodeBlockDirectivesAsync(FormattingContext context)
+        private async Task<TextEdit[]> FormatProjectedHtmlDocument(
+            RazorCodeDocument codeDocument,
+            Range range,
+            string documentPath,
+            LSPFormattingOptions options)
         {
-            var source = context.CodeDocument.Source;
-            var syntaxTree = context.CodeDocument.GetSyntaxTree();
-            var nodes = syntaxTree.GetCodeBlockDirectives();
-            var allEdits = new List<TextEdit>();
-            for (var i = nodes.Length - 1; i >= 0; i--)
+            var @params = new RazorDocumentRangeFormattingParams()
             {
-                if (!(nodes[i].Body is RazorDirectiveBodySyntax directiveBody))
+                Kind = RazorLanguageKind.CSharp,
+                ProjectedRange = range,
+                HostDocumentFilePath = _filePathNormalizer.Normalize(documentPath),
+                Options = options
+            };
+
+            var result = await _server.Client.SendRequest<RazorDocumentRangeFormattingParams, RazorDocumentRangeFormattingResponse>(
+                "razor/rangeFormatting", @params);
+
+            return result.Edits;
+        }
+
+        private async Task<TextEdit[]> FormatProjectedCSharpDocument(RazorCodeDocument codeDocument, LSPFormattingOptions options)
+        {
+            var workspace = _projectSnapshotManagerAccessor.Instance.Workspace;
+
+            var cSharpOptions = workspace.Options
+                .WithChangedOption(RoslynFormattingOptions.TabSize, LanguageNames.CSharp, (int)options.TabSize)
+                .WithChangedOption(RoslynFormattingOptions.UseTabs, LanguageNames.CSharp, !options.InsertSpaces);
+
+            var csharpSpans = new List<TextSpan>();
+            var csharpDocument = codeDocument.GetCSharpDocument();
+            var syntaxTree = CSharpSyntaxTree.ParseText(csharpDocument.GeneratedCode);
+            var sourceText = SourceText.From(csharpDocument.GeneratedCode);
+            var root = await syntaxTree.GetRootAsync();
+            foreach (var mapping in csharpDocument.SourceMappings)
+            {
+                var span = new TextSpan(mapping.GeneratedSpan.AbsoluteIndex, mapping.GeneratedSpan.Length);
+                csharpSpans.Add(span);
+            }
+
+            // Actually format all the C# parts of the document.
+            var textChanges = Formatter.GetFormattedTextChanges(root, csharpSpans, workspace, options: cSharpOptions);
+
+            var csharpEdits = new List<TextEdit>();
+            foreach (var change in textChanges)
+            {
+                csharpEdits.Add(change.AsTextEdit(sourceText));
+            }
+
+            // We now have the edits for the projected C# document. We need to map these back to the original razor document.
+            var actualEdits = MapProjectedCSharpEdits(codeDocument, csharpEdits);
+            return actualEdits;
+        }
+
+        private TextEdit[] MapProjectedCSharpEdits(RazorCodeDocument codeDocument, List<TextEdit> csharpEdits)
+        {
+            var actualEdits = new List<TextEdit>();
+            foreach (var edit in csharpEdits)
+            {
+                if (_documentMappingService.TryMapFromProjectedDocumentRange(codeDocument, edit.Range, out var newRange))
                 {
-                    continue;
-                }
-
-                var node = directiveBody.CSharpCode.DescendantNodes().FirstOrDefault(n => n is CSharpCodeBlockSyntax);
-                if (node == null)
-                {
-                    // Nothing to indent.
-                    continue;
-                }
-
-                if (node.DescendantNodes().Any(n => n is MarkupBlockSyntax))
-                {
-                    // We currently don't support formatting code block directives with markup.
-                    continue;
-                }
-
-                var lineSpan = node.GetLinePositionSpan(source);
-                var codeBlockRange = new Range(
-                    new Position(lineSpan.Start.Line, lineSpan.Start.Character),
-                    new Position(lineSpan.End.Line, lineSpan.End.Character));
-
-                if (!codeBlockRange.OverlapsWith(context.Range))
-                {
-                    // This code block directive doesn't fall under the selected range.
-                    continue;
-                }
-
-                var actualRange = codeBlockRange.Overlap(context.Range);
-                var edits = await _cSharpFormatter.FormatAsync(context.CodeDocument, actualRange, context.Uri, context.Options);
-
-                // I don't like this.
-                //if (actualRange.Start == codeBlockRange.Start)
-                //{
-                //    allEdits.Add(new TextEdit()
-                //    {
-                //        NewText = Environment.NewLine + new string(context.Options.InsertSpaces ? ' ' : '\t', (int)context.Options.TabSize),
-                //        Range = new Range(actualRange.Start, actualRange.Start),
-                //    });
-                //}
-
-                foreach (var edit in edits)
-                {
-                    // Do the following here,
-                    // 1. If the edit removes a newline, figure out which line comes next and remove 1 level of indentation
-                    // 2. If the edit adds a newline, figure out which line comes next and remove 1 level of indentation
-                    // 3. If the edit happens within the same line, make sure it is at the start of the line and remove 1 level of indentation.
-                    allEdits.Add(edit);
+                    actualEdits.Add(new TextEdit()
+                    {
+                        NewText = edit.NewText,
+                        Range = newRange,
+                    });
                 }
             }
 
-            return allEdits.ToArray();
+            return actualEdits.ToArray();
         }
 
-        private async Task<bool> ApplyEdit(Uri uri, Range range, string newText)
+        internal class IndentationContext
         {
-            var edit = new TextEdit()
+            public int Line { get; set; }
+
+            public int IndentationLevel { get; set; }
+
+            public int ExistingIndentation { get; set; }
+
+            public FormattingSpan FirstSpan { get; set; }
+
+            public override string ToString()
             {
-                NewText = newText,
-                Range = new Range(range.Start, range.Start)
-            };
-
-            var changes = new Dictionary<Uri, IEnumerable<TextEdit>>();
-            changes[uri] = new[] { edit };
-
-            var @params = new ApplyWorkspaceEditParams()
-            {
-                Edit = new WorkspaceEdit()
-                {
-                    Changes = changes
-                }
-            };
-
-            var response = await _server.Client.SendRequest<ApplyWorkspaceEditParams, ApplyWorkspaceEditResponse>("workspace/applyEdit", @params);
-
-            return response.Applied;
+                return $"Line: {Line}, Indentation Level: {IndentationLevel}, ExistingIndentation: {ExistingIndentation}";
+            }
         }
     }
 }

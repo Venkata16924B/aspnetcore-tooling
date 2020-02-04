@@ -3,7 +3,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.AspNetCore.Razor.Language;
+using Microsoft.AspNetCore.Razor.Language.Syntax;
 
 namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
 {
@@ -20,6 +22,22 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
             visitor.Visit(syntaxTree.Root);
 
             return visitor.FormattingSpans;
+        }
+
+        public static RazorDirectiveSyntax[] GetCodeBlockDirectives(this RazorSyntaxTree syntaxTree)
+        {
+            if (syntaxTree == null)
+            {
+                throw new ArgumentNullException(nameof(syntaxTree));
+            }
+
+            var codeBlockDirectives = syntaxTree.Root
+                .DescendantNodes(node => node is RazorDocumentSyntax || node is MarkupBlockSyntax || node is CSharpCodeBlockSyntax)
+                .OfType<RazorDirectiveSyntax>()
+                .Where(directive => directive.DirectiveDescriptor.Kind == DirectiveKind.CodeBlock)
+                .ToArray();
+
+            return codeBlockDirectives;
         }
     }
 }

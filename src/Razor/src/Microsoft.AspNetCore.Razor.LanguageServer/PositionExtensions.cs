@@ -25,5 +25,21 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
             var index = sourceText.Lines.GetPosition(linePosition);
             return index;
         }
+
+        public static int CompareTo(this Position position, Position other)
+        {
+            if (position is null)
+            {
+                throw new ArgumentNullException(nameof(position));
+            }
+
+            if (other is null)
+            {
+                throw new ArgumentNullException(nameof(other));
+            }
+
+            var result = position.Line.CompareTo(other.Line);
+            return (result != 0) ? result : position.Character.CompareTo(other.Character);
+        }
     }
 }
