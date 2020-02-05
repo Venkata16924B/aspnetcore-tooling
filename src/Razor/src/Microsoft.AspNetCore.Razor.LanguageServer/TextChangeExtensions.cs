@@ -17,10 +17,11 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
                 throw new ArgumentNullException(nameof(sourceText));
             }
 
-            var lineSpan = sourceText.Lines.GetLinePositionSpan(textChange.Span);
+            sourceText.GetLinesAndOffsets(textChange.Span, out var startLine, out var startChar, out var endLine, out var endChar);
+
             var range = new Range(
-                new Position(lineSpan.Start.Line, lineSpan.Start.Character),
-                new Position(lineSpan.End.Line, lineSpan.End.Character));
+                new Position(startLine, startChar),
+                new Position(endLine, endChar));
 
             return new TextEdit()
             {

@@ -9,9 +9,11 @@ using Microsoft.AspNetCore.Razor.Language;
 using Microsoft.AspNetCore.Razor.Language.Legacy;
 using Microsoft.AspNetCore.Razor.Language.Syntax;
 using Microsoft.AspNetCore.Razor.LanguageServer.Common;
+using Microsoft.CodeAnalysis.Text;
 using OmniSharp.Extensions.LanguageServer.Protocol.Models;
 using OmniSharp.Extensions.LanguageServer.Protocol.Server;
 using Range = OmniSharp.Extensions.LanguageServer.Protocol.Models.Range;
+using TextSpan = Microsoft.CodeAnalysis.Text.TextSpan;
 
 namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
 {
@@ -214,8 +216,13 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
         private async Task<TextEdit[]> FormatCodeBlockDirectivesAsync(FormattingContext context)
         {
             var source = context.CodeDocument.Source;
+            var charBuffer = new char[source.Length];
+            source.CopyTo(0, charBuffer, 0, source.Length);
+            var sourceText = SourceText.From(new string(charBuffer));
+
             var syntaxTree = context.CodeDocument.GetSyntaxTree();
             var nodes = syntaxTree.GetCodeBlockDirectives();
+
             var allEdits = new List<TextEdit>();
             for (var i = nodes.Length - 1; i >= 0; i--)
             {
@@ -250,28 +257,76 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
 
                 var actualRange = codeBlockRange.Overlap(context.Range);
                 var edits = await _cSharpFormatter.FormatAsync(context.CodeDocument, actualRange, context.Uri, context.Options);
-
-                // I don't like this.
-                //if (actualRange.Start == codeBlockRange.Start)
-                //{
-                //    allEdits.Add(new TextEdit()
-                //    {
-                //        NewText = Environment.NewLine + new string(context.Options.InsertSpaces ? ' ' : '\t', (int)context.Options.TabSize),
-                //        Range = new Range(actualRange.Start, actualRange.Start),
-                //    });
-                //}
-
-                foreach (var edit in edits)
-                {
-                    // Do the following here,
-                    // 1. If the edit removes a newline, figure out which line comes next and remove 1 level of indentation
-                    // 2. If the edit adds a newline, figure out which line comes next and remove 1 level of indentation
-                    // 3. If the edit happens within the same line, make sure it is at the start of the line and remove 1 level of indentation.
-                    allEdits.Add(edit);
-                }
+                edits = TransformEdits(sourceText, edits, codeBlockRange, context);
+                allEdits.AddRange(edits);
             }
 
             return allEdits.ToArray();
+        }
+
+        private TextEdit[] TransformEdits(SourceText sourceText, TextEdit[] edits, Range codeBlockRange, FormattingContext context)
+        {
+            if (edits.Length == 0)
+            {
+                return Array.Empty<TextEdit>();
+            }
+
+            var currentIndentation = context.Indentations[(int)codeBlockRange.Start.Line].IndentationLevel;
+            var desiredIndentation = currentIndentation + 1;
+            var originalSpan = codeBlockRange.AsTextSpan(sourceText);
+            var changes = edits.Select(e => e.AsTextChange(sourceText));
+            var changedText = sourceText.WithChanges(changes);
+            var changeRange = changedText.GetEncompassingTextChangeRange(sourceText);
+            var changedSpan = new TextSpan(changeRange.Span.Start, changeRange.NewLength);
+
+            var editsToApply = new List<TextChange>();
+            var firstLine = changedText.Lines[(int)codeBlockRange.Start.Line];
+            if (!string.IsNullOrWhiteSpace(firstLine.ToString().Substring(originalSpan.Start - firstLine.Start)))
+            {
+                // If the first line is not whitespace, add a newline at the beginning.
+                var span = new TextSpan(originalSpan.Start, length: 0);
+                editsToApply.Add(new TextChange(span, Environment.NewLine + GetIndentationString(context, desiredIndentation)));
+            }
+
+            changedText.GetLinesAndOffsets(changedSpan, out var startLine, out _, out var endLine, out _);
+            for (var i = startLine; i <= endLine; i++)
+            {
+                if (i == firstLine.LineNumber)
+                {
+                    continue;
+                }
+
+                var line = changedText.Lines[i];
+
+                var leadingWhitespace = line.GetLeadingWhitespace();
+                if (leadingWhitespace.Length < context.Options.TabSize * desiredIndentation)
+                {
+                    var span = new TextSpan(line.Start, length: leadingWhitespace.Length);
+                    editsToApply.Add(new TextChange(span, GetIndentationString(context, desiredIndentation)));
+                }
+                else if (leadingWhitespace.Length > context.Options.TabSize * desiredIndentation)
+                {
+                    var span = new TextSpan(line.Start, length: (int)context.Options.TabSize * desiredIndentation);
+                    editsToApply.Add(new TextChange(span, string.Empty));
+                }
+            }
+
+            // Need to do this because of https://github.com/dotnet/roslyn/issues/41413.
+            changedText = SourceText.From(changedText.ToString());
+
+            changedText = changedText.WithChanges(editsToApply);
+
+            changes = changedText.GetTextChanges(sourceText);
+
+            var transformedEdits = changes.Select(c => c.AsTextEdit(sourceText)).ToArray();
+            return transformedEdits;
+        }
+
+        private string GetIndentationString(FormattingContext context, int indentationLevel)
+        {
+            var indentChar = context.Options.InsertSpaces ? ' ' : '\t';
+            var indentation = new string(indentChar, (int)context.Options.TabSize * indentationLevel);
+            return indentation;
         }
 
         private async Task<bool> ApplyEdit(Uri uri, Range range, string newText)

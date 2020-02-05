@@ -21,10 +21,7 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
                 throw new ArgumentNullException(nameof(sourceText));
             }
 
-            var start = sourceText.Lines[(int)textEdit.Range.Start.Line].Start + (int)textEdit.Range.Start.Character;
-            var end = sourceText.Lines[(int)textEdit.Range.End.Line].Start + (int)textEdit.Range.End.Character;
-            var span = new TextSpan(start, end - start);
-
+            var span = textEdit.Range.AsTextSpan(sourceText);
             return new TextChange(span, textEdit.NewText);
         }
     }

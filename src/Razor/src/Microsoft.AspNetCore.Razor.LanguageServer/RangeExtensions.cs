@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
+using Microsoft.CodeAnalysis.Text;
 using Range = OmniSharp.Extensions.LanguageServer.Protocol.Models.Range;
 
 namespace Microsoft.AspNetCore.Razor.LanguageServer
@@ -67,6 +68,23 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
             }
 
             return null;
+        }
+
+        public static TextSpan AsTextSpan(this Range range, SourceText sourceText)
+        {
+            if (range is null)
+            {
+                throw new ArgumentNullException(nameof(range));
+            }
+
+            if (sourceText is null)
+            {
+                throw new ArgumentNullException(nameof(sourceText));
+            }
+
+            var start = sourceText.Lines[(int)range.Start.Line].Start + (int)range.Start.Character;
+            var end = sourceText.Lines[(int)range.End.Line].Start + (int)range.End.Character;
+            return new TextSpan(start, end - start);
         }
     }
 }
