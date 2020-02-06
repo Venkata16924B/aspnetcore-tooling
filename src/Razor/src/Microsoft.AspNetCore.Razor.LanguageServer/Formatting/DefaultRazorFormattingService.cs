@@ -279,6 +279,8 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
             var sourceText = context.CodeDocument.GetSourceText();
             var currentIndentation = context.Indentations[(int)codeBlockRange.Start.Line].IndentationLevel;
             var originalCodeBlockSpan = codeBlockRange.AsTextSpan(sourceText);
+            var inputRange = context.Range;
+            var inputSpan = inputRange.AsTextSpan(sourceText);
             var changes = edits.Select(e => e.AsTextChange(sourceText));
             var changedText = sourceText.WithChanges(changes);
             var affectedRange = changedText.GetEncompassingTextChangeRange(sourceText);
@@ -313,16 +315,17 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
                 editsToApply.Add(lastLineChange);
             }
 
-            changedText.GetLinesAndOffsets(changedCodeBlockSpan, out var startLine, out _, out var endLine, out _);
-            for (var i = startLine + 1; i <= endLine; i++)
+            var changedInputSpan = TextSpan.FromBounds(inputSpan.Start, inputSpan.End + affectedRange.NewLength - affectedRange.Span.Length);
+            var overlappingSpan = changedInputSpan.Overlap(changedCodeBlockSpan);
+            if (!overlappingSpan.HasValue)
+            {
+                return Array.Empty<TextEdit>();
+            }
+            var overlappingRange = overlappingSpan.Value.AsRange(changedText);
+            for (var i = (int)overlappingRange.Start.Line; i <= overlappingRange.End.Line; i++)
             {
                 var line = changedText.Lines[i];
                 if (line.Span.Length == 0)
-                {
-                    continue;
-                }
-
-                if (i < context.Range.Start.Line || i > context.Range.End.Line)
                 {
                     continue;
                 }
@@ -334,14 +337,16 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
                     desiredIndentation = currentIndentation + 1;
                 }
 
-                if (leadingWhitespace.Length < context.Options.TabSize * desiredIndentation)
+                var desiredIndentationLength = (int)context.Options.TabSize * desiredIndentation;
+                if (leadingWhitespace.Length < desiredIndentationLength)
                 {
                     var span = new TextSpan(line.Start, length: leadingWhitespace.Length);
                     editsToApply.Add(new TextChange(span, GetIndentationString(context, desiredIndentation)));
                 }
-                else if (leadingWhitespace.Length > context.Options.TabSize * desiredIndentation)
+                else if (leadingWhitespace.Length > desiredIndentationLength)
                 {
-                    var span = new TextSpan(line.Start, length: (int)context.Options.TabSize * desiredIndentation);
+                    var length = Math.Min(leadingWhitespace.Length - desiredIndentationLength, desiredIndentationLength);
+                    var span = new TextSpan(line.Start, length);
                     editsToApply.Add(new TextChange(span, string.Empty));
                 }
             }
