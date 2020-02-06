@@ -313,17 +313,16 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
                 editsToApply.Add(lastLineChange);
             }
 
-            var affectedSpan = new TextSpan(affectedRange.Span.Start, affectedRange.NewLength);
-            changedText.GetLinesAndOffsets(affectedSpan, out var startLine, out _, out var endLine, out _);
-            for (var i = startLine; i <= endLine; i++)
+            changedText.GetLinesAndOffsets(changedCodeBlockSpan, out var startLine, out _, out var endLine, out _);
+            for (var i = startLine + 1; i <= endLine; i++)
             {
-                if (i == firstLine.LineNumber)
+                var line = changedText.Lines[i];
+                if (line.Span.Length == 0)
                 {
                     continue;
                 }
 
-                var line = changedText.Lines[i];
-                if (line.Span.Length == 0)
+                if (i < context.Range.Start.Line || i > context.Range.End.Line)
                 {
                     continue;
                 }
