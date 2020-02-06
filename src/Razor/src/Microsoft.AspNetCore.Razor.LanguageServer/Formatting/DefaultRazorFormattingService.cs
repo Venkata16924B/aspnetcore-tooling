@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Razor.Language.Legacy;
 using Microsoft.AspNetCore.Razor.Language.Syntax;
 using Microsoft.AspNetCore.Razor.LanguageServer.Common;
 using Microsoft.CodeAnalysis.Text;
+using Microsoft.Extensions.Logging;
 using OmniSharp.Extensions.LanguageServer.Protocol.Models;
 using OmniSharp.Extensions.LanguageServer.Protocol.Server;
 using Range = OmniSharp.Extensions.LanguageServer.Protocol.Models.Range;
@@ -22,11 +23,13 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
         private readonly ILanguageServer _server;
         private readonly CSharpFormatter _cSharpFormatter;
         private readonly HtmlFormatter _htmlFormatter;
+        private readonly ILogger _logger;
 
         public DefaultRazorFormattingService(
             RazorDocumentMappingService documentMappingService,
             FilePathNormalizer filePathNormalizer,
-            ILanguageServer server)
+            ILanguageServer server,
+            ILoggerFactory loggerFactory)
         {
             if (documentMappingService is null)
             {
@@ -43,9 +46,15 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
                 throw new ArgumentNullException(nameof(server));
             }
 
+            if (loggerFactory is null)
+            {
+                throw new ArgumentNullException(nameof(loggerFactory));
+            }
+
             _server = server;
             _cSharpFormatter = new CSharpFormatter(documentMappingService, server, filePathNormalizer);
             _htmlFormatter = new HtmlFormatter(server, filePathNormalizer);
+            _logger = loggerFactory.CreateLogger<DefaultRazorFormattingService>();
         }
 
         public override async Task<TextEdit[]> FormatAsync(Uri uri, RazorCodeDocument codeDocument, Range range, FormattingOptions options)
@@ -216,10 +225,6 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
         private async Task<TextEdit[]> FormatCodeBlockDirectivesAsync(FormattingContext context)
         {
             var source = context.CodeDocument.Source;
-            var charBuffer = new char[source.Length];
-            source.CopyTo(0, charBuffer, 0, source.Length);
-            var sourceText = SourceText.From(new string(charBuffer));
-
             var syntaxTree = context.CodeDocument.GetSyntaxTree();
             var nodes = syntaxTree.GetCodeBlockDirectives();
 
@@ -257,38 +262,59 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
 
                 var actualRange = codeBlockRange.Overlap(context.Range);
                 var edits = await _cSharpFormatter.FormatAsync(context.CodeDocument, actualRange, context.Uri, context.Options);
-                edits = TransformEdits(sourceText, edits, codeBlockRange, context);
+                edits = TransformEdits(context, codeBlockRange, edits);
                 allEdits.AddRange(edits);
             }
 
             return allEdits.ToArray();
         }
 
-        private TextEdit[] TransformEdits(SourceText sourceText, TextEdit[] edits, Range codeBlockRange, FormattingContext context)
+        private TextEdit[] TransformEdits(FormattingContext context, Range codeBlockRange, TextEdit[] edits)
         {
             if (edits.Length == 0)
             {
                 return Array.Empty<TextEdit>();
             }
 
+            var sourceText = context.CodeDocument.GetSourceText();
             var currentIndentation = context.Indentations[(int)codeBlockRange.Start.Line].IndentationLevel;
-            var desiredIndentation = currentIndentation + 1;
-            var originalSpan = codeBlockRange.AsTextSpan(sourceText);
+            var originalCodeBlockSpan = codeBlockRange.AsTextSpan(sourceText);
             var changes = edits.Select(e => e.AsTextChange(sourceText));
             var changedText = sourceText.WithChanges(changes);
-            var changeRange = changedText.GetEncompassingTextChangeRange(sourceText);
-            var changedSpan = new TextSpan(changeRange.Span.Start, changeRange.NewLength);
+            var affectedRange = changedText.GetEncompassingTextChangeRange(sourceText);
+            var changedCodeBlockSpan = TextSpan.FromBounds(originalCodeBlockSpan.Start, originalCodeBlockSpan.End + affectedRange.NewLength - affectedRange.Span.Length);
 
-            var editsToApply = new List<TextChange>();
-            var firstLine = changedText.Lines[(int)codeBlockRange.Start.Line];
-            if (!string.IsNullOrWhiteSpace(firstLine.ToString().Substring(originalSpan.Start - firstLine.Start)))
+            if (!originalCodeBlockSpan.Contains(affectedRange.Span))
             {
-                // If the first line is not whitespace, add a newline at the beginning.
-                var span = new TextSpan(originalSpan.Start, length: 0);
-                editsToApply.Add(new TextChange(span, Environment.NewLine + GetIndentationString(context, desiredIndentation)));
+                _logger.LogDebug($"The changed region {affectedRange.Span} was not a subset of the code block {originalCodeBlockSpan}. This shouldn't happen.");
             }
 
-            changedText.GetLinesAndOffsets(changedSpan, out var startLine, out _, out var endLine, out _);
+            var editsToApply = new List<TextChange>();
+
+            // we want to keep the open '@code {' on its own line. So bring everything else after it to the next line.
+            var firstLine = changedText.Lines[(int)codeBlockRange.Start.Line];
+            var textAfterBlockStart = firstLine.ToString().Substring(originalCodeBlockSpan.Start - firstLine.Start);
+            if (!string.IsNullOrWhiteSpace(textAfterBlockStart))
+            {
+                // If the first line contains code, add a newline at the beginning and indent it.
+                var desiredIndentation = currentIndentation + 1;
+                var span = new TextSpan(originalCodeBlockSpan.Start, length: textAfterBlockStart.Length);
+                var newFirstLine = Environment.NewLine + GetIndentationString(context, desiredIndentation) + textAfterBlockStart.Trim();
+                editsToApply.Add(new TextChange(span, newFirstLine));
+            }
+
+            // we want to keep the close '}' on its own line. So bring it to the next line.
+            var closeCurlyLocation = changedCodeBlockSpan.End;
+            var closeCurlyLine = changedText.Lines.GetLineFromPosition(closeCurlyLocation);
+            var firstNonWhitespaceCharacterLocation = closeCurlyLine.GetFirstNonWhitespaceOffset();
+            if (closeCurlyLine.Start + firstNonWhitespaceCharacterLocation != closeCurlyLocation)
+            {
+                var lastLineChange = new TextChange(new TextSpan(closeCurlyLocation, length: 0), Environment.NewLine);
+                editsToApply.Add(lastLineChange);
+            }
+
+            var affectedSpan = new TextSpan(affectedRange.Span.Start, affectedRange.NewLength);
+            changedText.GetLinesAndOffsets(affectedSpan, out var startLine, out _, out var endLine, out _);
             for (var i = startLine; i <= endLine; i++)
             {
                 if (i == firstLine.LineNumber)
@@ -297,8 +323,18 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
                 }
 
                 var line = changedText.Lines[i];
+                if (line.Span.Length == 0)
+                {
+                    continue;
+                }
 
                 var leadingWhitespace = line.GetLeadingWhitespace();
+                var desiredIndentation = currentIndentation;
+                if (changedCodeBlockSpan.Contains(line.Start))
+                {
+                    desiredIndentation = currentIndentation + 1;
+                }
+
                 if (leadingWhitespace.Length < context.Options.TabSize * desiredIndentation)
                 {
                     var span = new TextSpan(line.Start, length: leadingWhitespace.Length);

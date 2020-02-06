@@ -3,6 +3,7 @@
 
 using System;
 using Microsoft.AspNetCore.Razor.Language;
+using Microsoft.AspNetCore.Razor.LanguageServer.Common;
 using Microsoft.CodeAnalysis.Text;
 using OmniSharp.Extensions.LanguageServer.Protocol.Models;
 using Range = OmniSharp.Extensions.LanguageServer.Protocol.Models.Range;
@@ -60,10 +61,7 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
             }
 
             projectedRange = default;
-            var source = codeDocument.Source;
-            var charBuffer = new char[source.Length];
-            source.CopyTo(0, charBuffer, 0, source.Length);
-            var sourceText = SourceText.From(new string(charBuffer));
+            var sourceText = codeDocument.GetSourceText();
             var range = originalRange;
 
             var startIndex = range.Start.GetAbsoluteIndex(sourceText);

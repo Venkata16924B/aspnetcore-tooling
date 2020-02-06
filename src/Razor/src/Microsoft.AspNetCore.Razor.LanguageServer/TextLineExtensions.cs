@@ -28,11 +28,6 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer
                 : null;
         }
 
-        /// <summary>
-        /// Returns the first non-whitespace position on the given line as an offset
-        /// from the start of the line, or null if the line is empty or contains only
-        /// whitespace.
-        /// </summary>
         public static int? GetFirstNonWhitespaceOffset(this TextLine line)
         {
             var lineString = line.ToString();
