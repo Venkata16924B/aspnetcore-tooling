@@ -57,7 +57,7 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Test.Hover
             var txt = $"@addTagHelper *, TestAssembly{Environment.NewLine}<test1 bool-val='true'></test1>";
             var codeDocument = CreateCodeDocument(txt, DefaultTagHelpers);
             var service = GetDefaultRazorHoverInfoService();
-            var location = new SourceSpan(txt.IndexOf("true"), 0);
+            var location = new SourceLocation(txt.IndexOf("true"), -1, -1);
 
             // Act
             var hover = service.GetHoverInfo(codeDocument, location);
@@ -73,7 +73,7 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Test.Hover
             var txt = $"@addTagHelper *, TestAssembly{Environment.NewLine}<test1 bool-val='true'></test1>";
             var codeDocument = CreateCodeDocument(txt, DefaultTagHelpers);
             var service = GetDefaultRazorHoverInfoService();
-            var location = new SourceSpan(txt.IndexOf("=") + 1, 0);
+            var location = new SourceLocation(txt.IndexOf("=") + 1, -1, -1);
 
             // Act
             var hover = service.GetHoverInfo(codeDocument, location);
@@ -89,7 +89,7 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Test.Hover
             var txt = $"@addTagHelper *, TestAssembly{Environment.NewLine}<test1 bool-val='true'></test1>";
             var codeDocument = CreateCodeDocument(txt, DefaultTagHelpers);
             var service = GetDefaultRazorHoverInfoService();
-            var location = new SourceSpan(txt.IndexOf("true'") + 5, 0);
+            var location = new SourceLocation(txt.IndexOf("true'") + 5, -1, -1);
 
             // Act
             var hover = service.GetHoverInfo(codeDocument, location);
@@ -130,7 +130,7 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Test.Hover
             var codeDocument = CreateCodeDocument(txt, "text.razor", DefaultTagHelpers);
             var service = GetDefaultRazorHoverInfoService();
             var charIndex = txt.IndexOf("@test") + 2;
-            var location = new SourceSpan(charIndex, 0);
+            var location = new SourceLocation(charIndex, -1, -1);
 
             // Act
             var hover = service.GetHoverInfo(codeDocument, location);

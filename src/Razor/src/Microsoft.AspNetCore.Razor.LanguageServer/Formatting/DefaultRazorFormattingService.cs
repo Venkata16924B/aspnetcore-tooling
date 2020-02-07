@@ -81,55 +81,8 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
 
             var formattingContext = CreateFormattingContext(uri, codeDocument, range, options);
 
-            var edits2 = await FormatCodeBlockDirectivesAsync(formattingContext);
-
-            var edits = new List<TextEdit>();
-            for (var i = (int)range.Start.Line; i <= (int)range.End.Line; i++)
-            {
-                var context = formattingContext.Indentations[i];
-                if (context.IndentationLevel == -1)
-                {
-                    // Couldn't determine the desired indentation. Leave this line alone.
-                    continue;
-                }
-
-                var desiredIndentation = context.IndentationLevel * options.TabSize;
-
-                if (context.FirstSpan.Kind == FormattingSpanKind.Code &&
-                    context.ExistingIndentation >= desiredIndentation)
-                {
-                    // This is C# and it is already indented at least the minimum amount we require.
-                    // Since we don't understand the structure of C#, it is better to leave this line alone.
-                    continue;
-                }
-
-                var effectiveIndentation = desiredIndentation - context.ExistingIndentation;
-                if (effectiveIndentation > 0)
-                {
-                    var indentationChar = options.InsertSpaces ? ' ' : '\t';
-                    var indentationString = new string(indentationChar, (int)effectiveIndentation);
-                    var edit = new TextEdit()
-                    {
-                        Range = new Range(new Position(i, 0), new Position(i, 0)),
-                        NewText = indentationString,
-                    };
-
-                    edits.Add(edit);
-                }
-                else if (effectiveIndentation < 0)
-                {
-                    var edit = new TextEdit()
-                    {
-                        Range = new Range(new Position(i, 0), new Position(i, -effectiveIndentation)),
-                        NewText = string.Empty,
-                    };
-
-                    edits.Add(edit);
-                }
-            }
-
-            // return edits.ToArray();
-            return edits2;
+            var edits = await FormatCodeBlockDirectivesAsync(formattingContext);
+            return edits;
         }
 
         internal static FormattingContext CreateFormattingContext(Uri uri, RazorCodeDocument codedocument, Range range, FormattingOptions options)
@@ -296,7 +249,8 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
             // we want to keep the open '@code {' on its own line. So bring everything else after it to the next line.
             var firstLine = changedText.Lines[(int)codeBlockRange.Start.Line];
             var textAfterBlockStart = firstLine.ToString().Substring(originalCodeBlockSpan.Start - firstLine.Start);
-            if (!string.IsNullOrWhiteSpace(textAfterBlockStart))
+            var isBlockStartOnSeparateLine = string.IsNullOrWhiteSpace(textAfterBlockStart);
+            if (!isBlockStartOnSeparateLine)
             {
                 // If the first line contains code, add a newline at the beginning and indent it.
                 var desiredIndentation = currentIndentation + 1;
@@ -308,7 +262,7 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
             // we want to keep the close '}' on its own line. So bring it to the next line.
             var closeCurlyLocation = changedCodeBlockSpan.End;
             var closeCurlyLine = changedText.Lines.GetLineFromPosition(closeCurlyLocation);
-            var firstNonWhitespaceCharacterLocation = closeCurlyLine.GetFirstNonWhitespaceOffset();
+            var firstNonWhitespaceCharacterLocation = closeCurlyLine.GetFirstNonWhitespaceOffset() ?? 0;
             if (closeCurlyLine.Start + firstNonWhitespaceCharacterLocation != closeCurlyLocation)
             {
                 var lastLineChange = new TextChange(new TextSpan(closeCurlyLocation, length: 0), Environment.NewLine);
@@ -331,6 +285,14 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
                 }
 
                 var leadingWhitespace = line.GetLeadingWhitespace();
+                if (!(isBlockStartOnSeparateLine && i == firstLine.LineNumber + 1) && leadingWhitespace.Length == 0)
+                {
+                    // For whatever reason, the C# formatter decided to not indent this. Leave it as is.
+                    // Except if it is the first line of code in the block, then we should indent it
+                    // because of how our SourceMappings work.
+                    continue;
+                }
+
                 var desiredIndentation = currentIndentation;
                 if (changedCodeBlockSpan.Contains(line.Start))
                 {
@@ -351,46 +313,23 @@ namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
                 }
             }
 
-            // Need to do this because of https://github.com/dotnet/roslyn/issues/41413.
-            changedText = SourceText.From(changedText.ToString());
-
             changedText = changedText.WithChanges(editsToApply);
 
-            changes = changedText.GetTextChanges(sourceText);
+            // Once https://github.com/dotnet/roslyn/issues/41413 is fixed,
+            // the following lines can be replaced with `changes = changedText.GetTextChanges(sourceText)`.
+            affectedRange = changedText.GetEncompassingTextChangeRange(sourceText);
+            changedCodeBlockSpan = TextSpan.FromBounds(originalCodeBlockSpan.Start, originalCodeBlockSpan.End + affectedRange.NewLength - affectedRange.Span.Length);
+            var change = new TextChange(originalCodeBlockSpan, changedText.GetSubText(changedCodeBlockSpan).ToString());
 
-            var transformedEdits = changes.Select(c => c.AsTextEdit(sourceText)).ToArray();
+            var transformedEdits = new[] { change.AsTextEdit(sourceText) };
             return transformedEdits;
         }
 
-        private string GetIndentationString(FormattingContext context, int indentationLevel)
+        private static string GetIndentationString(FormattingContext context, int indentationLevel)
         {
             var indentChar = context.Options.InsertSpaces ? ' ' : '\t';
             var indentation = new string(indentChar, (int)context.Options.TabSize * indentationLevel);
             return indentation;
-        }
-
-        private async Task<bool> ApplyEdit(Uri uri, Range range, string newText)
-        {
-            var edit = new TextEdit()
-            {
-                NewText = newText,
-                Range = new Range(range.Start, range.Start)
-            };
-
-            var changes = new Dictionary<Uri, IEnumerable<TextEdit>>();
-            changes[uri] = new[] { edit };
-
-            var @params = new ApplyWorkspaceEditParams()
-            {
-                Edit = new WorkspaceEdit()
-                {
-                    Changes = changes
-                }
-            };
-
-            var response = await _server.Client.SendRequest<ApplyWorkspaceEditParams, ApplyWorkspaceEditResponse>("workspace/applyEdit", @params);
-
-            return response.Applied;
         }
     }
 }

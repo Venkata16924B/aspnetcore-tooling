@@ -1,90 +1,234 @@
 ﻿// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Threading.Tasks;
-using Microsoft.AspNetCore.Razor.Language;
-using Microsoft.AspNetCore.Razor.LanguageServer.Common;
-using Microsoft.CodeAnalysis.Razor;
-using Microsoft.CodeAnalysis.Text;
-using Moq;
-using OmniSharp.Extensions.LanguageServer.Protocol.Models;
-using OmniSharp.Extensions.LanguageServer.Protocol.Server;
 using Xunit;
-using Range = OmniSharp.Extensions.LanguageServer.Protocol.Models.Range;
 
 namespace Microsoft.AspNetCore.Razor.LanguageServer.Formatting
 {
-    public class DefaultRazorFormattingServiceTest
+    public class DefaultRazorFormattingServiceTest : FormattingTestBase
     {
         [Fact]
-        public async Task FormatAsync_FormatsDocument()
+        public async Task FormatsCodeBlockDirective()
         {
-            // Arrange
-            var path = "file:///path/to/document.razor";
-            var uri = new Uri(path);
-            var source = SourceText.From(@"
+            await RunFormattingTestAsync(
+input: @"
+|@functions {
+ public class Foo{}
+        public interface Bar {
+}
+}|
+",
+expected: @"
+@functions {
+    public class Foo { }
+    public interface Bar
+    {
+    }
+}
+");
+        }
+
+        [Fact]
+        public async Task DoesNotFormat_NonCodeBlockDirectives()
+        {
+            await RunFormattingTestAsync(
+input: @"
+|@{
+var x = ""foo"";
+}
+<div>
+        </div>|
+",
+expected: @"
 @{
 var x = ""foo"";
 }
 <div>
-<span>
-                Hello
- </span>
         </div>
 ");
-            var codeDocument = CreateCodeDocument(source, path);
-            var range = new Range(new Position(0, 0), new Position(source.Lines.Count-1, 0));
-            var options = new FormattingOptions()
-            {
-                TabSize = 2,
-                InsertSpaces = true,
-            };
-            var formattingService = CreateService();
+        }
 
-            // Act
-            var edits = await formattingService.FormatAsync(uri, codeDocument, range, options);
-
-            // Assert
-            var edited = ApplyEdits(source, edits);
-            Assert.Equal(@"
-@{
-  var x = ""foo"";
+        [Fact]
+        public async Task DoesNotFormatCodeBlockDirectiveWithMarkup()
+        {
+            await RunFormattingTestAsync(
+input: @"
+|@functions {
+ public class Foo{
+void Method() { <div></div> }
 }
-<div>
-  <span>
-    Hello
-  </span>
-</div>
-", edited.ToString());
+}|
+",
+expected: @"
+@functions {
+ public class Foo{
+void Method() { <div></div> }
+}
+}
+");
         }
 
-        private SourceText ApplyEdits(SourceText source, TextEdit[] edits)
+        [Fact]
+        public async Task OnlyFormatsWithinRange()
         {
-            var changes = edits.Select(e => e.AsTextChange(source));
-            return source.WithChanges(changes);
+            await RunFormattingTestAsync(
+input: @"
+@functions {
+ public class Foo{}
+        |public interface Bar {
+}|
+}
+",
+expected: @"
+@functions {
+ public class Foo{}
+    public interface Bar
+    {
+    }
+}
+");
         }
 
-        private static RazorCodeDocument CreateCodeDocument(SourceText text, string path, IReadOnlyList<TagHelperDescriptor> tagHelpers = null)
+        [Fact]
+        public async Task MultipleCodeBlockDirectives()
         {
-            tagHelpers = tagHelpers ?? Array.Empty<TagHelperDescriptor>();
-            var sourceDocument = text.GetRazorSourceDocument(path, path);
-            var projectEngine = RazorProjectEngine.Create(builder => { });
-            var codeDocument = projectEngine.ProcessDesignTime(sourceDocument, FileKinds.Legacy, Array.Empty<RazorSourceDocument>(), tagHelpers);
-            return codeDocument;
+            await RunFormattingTestAsync(
+input: @"
+|@functions {
+ public class Foo{}
+        public interface Bar {
+}
+}
+Hello World
+@functions {
+      public class Baz    {
+          void Method ( )
+          { }
+          }
+}|
+",
+expected: @"
+@functions {
+    public class Foo { }
+    public interface Bar
+    {
+    }
+}
+Hello World
+@functions {
+    public class Baz
+    {
+        void Method()
+        { }
+    }
+}
+");
         }
 
-        private RazorFormattingService CreateService()
+        [Fact]
+        public async Task CodeOnTheSameLineAsCodeBlockDirectiveStart()
         {
-            var foregroundDispatcher = Mock.Of<ForegroundDispatcher>();
-            var mappingService = new DefaultRazorDocumentMappingService();
-            var filePathNormalizer = new FilePathNormalizer();
-            var projectSnapshotManagerAccessor = Mock.Of<ProjectSnapshotManagerAccessor>();
-            var languageServer = Mock.Of<ILanguageServer>();
+            await RunFormattingTestAsync(
+input: @"
+|@functions {public class Foo{
+}
+}|
+",
+expected: @"
+@functions {
+    public class Foo
+    {
+    }
+}
+");
+        }
 
-            return new DefaultRazorFormattingService(foregroundDispatcher, mappingService, filePathNormalizer, projectSnapshotManagerAccessor, languageServer);
+        [Fact]
+        public async Task CodeOnTheSameLineAsCodeBlockDirectiveEnd()
+        {
+            await RunFormattingTestAsync(
+input: @"
+|@functions {
+public class Foo{
+}}|
+",
+expected: @"
+@functions {
+    public class Foo
+    {
+    }
+}
+");
+        }
+
+        [Fact(Skip = "This doesn't work yet")]
+        public async Task SingleLineCodeBlockDirective()
+        {
+            await RunFormattingTestAsync(
+input: @"
+|@functions {public class Foo{}}|
+",
+expected: @"
+@functions {
+    public class Foo { }
+}
+");
+        }
+
+        [Fact]
+        public async Task ComplexCodeBlockDirective()
+        {
+            await RunFormattingTestAsync(
+input: @"
+|@functions{
+     public class Foo
+            {
+                public Foo()
+                {
+                    var arr = new string[ ] {
+""One"", ""two"",
+""three""
+                    };
+                }
+                    public int MyProperty { get
+                    {
+                    return 0 ;
+                    } set {} }
+
+void Method(){
+
+}
+                    }
+}|
+",
+expected: @"
+@functions{
+    public class Foo
+    {
+        public Foo()
+        {
+            var arr = new string[] {
+""One"", ""two"",
+""three""
+                };
+        }
+        public int MyProperty
+        {
+            get
+            {
+                return 0;
+            }
+            set { }
+        }
+
+        void Method()
+        {
+
+        }
+    }
+}
+");
         }
     }
 }
